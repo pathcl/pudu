@@ -1,5 +1,9 @@
 # pudu
 
+## Demo
+
+![demo](./demo.gif)
+
 A chaos engineering platform for SRE on-call training, built on [Firecracker](https://firecracker-microvm.github.io/) microVMs.
 
 Pudu launches fleets of lightweight VMs, injects realistic production failures (disk full, memory leaks, network latency, process crashes, DNS hijacks), and scores trainees on how quickly they diagnose and resolve the incident.
