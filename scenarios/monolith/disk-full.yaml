@@ -1,0 +1,69 @@
+scenario:
+  id: monolith-disk-full-001
+  title: "The Disk That Ate Everything"
+  difficulty: easy
+  architecture: monolith
+  tags: [disk, storage, monolith]
+  description: |
+    Your monolith web application has gone silent. Users are reporting 500 errors
+    and the on-call page just fired. The app was running fine an hour ago.
+    Find the root cause and restore service.
+
+environment:
+  tiers:
+    - name: app
+      count: 1
+      vcpus: 1
+      mem_mb: 512
+      services: [nginx]
+      setup:
+        - systemctl enable nginx
+        - systemctl start nginx
+        - 'echo ''server { listen 80 default_server; location /healthz { return 200 "ok\n"; add_header Content-Type text/plain; } }'' > /etc/nginx/sites-available/default'
+        - nginx -s reload
+
+faults:
+  - id: disk-fill-app
+    type: disk
+    target:
+      tier: app
+    params:
+      path: /
+    at: 0s
+
+signals:
+  alerts:
+    - name: DiskSpaceCritical
+      severity: critical
+      fired_at: 0s
+      message: "Disk usage on app-0:/ above 95% — writes are failing"
+    - name: DeploymentsFailing
+      severity: warning
+      fired_at: 0s
+      message: "Release pipeline failed: no space left on device"
+  symptoms:
+    - "New deployments are failing with 'no space left on device'"
+    - "Application logs have stopped updating"
+    - "Any operation that writes to disk (uploads, caching, logging) is failing"
+
+objectives:
+  - id: disk-recovered
+    description: Disk usage below 80% on app-0
+    check:
+      type: agent-metric
+      target:
+        vm: app-0
+      metric: disk_used_pct
+      condition: "< 80"
+
+
+hints:
+  - text: "Check disk usage with: df -h"
+  - text: "Look for large files: du -sh /* 2>/dev/null | sort -rh | head -20"
+  - text: "A hidden file named .pudu-diskfill is consuming space. Remove it to recover."
+
+scoring:
+  base: 100
+  time_penalty_per_second: 0.05
+  hint_penalty: 10
+  perfect_window: 5m

@@ -1,0 +1,26 @@
+#cloud-config
+packages:
+  - openssh-server
+  - openssh-client
+
+# Set root password
+chpasswd:
+  list: |
+    root:root
+  expire: False
+
+runcmd:
+  # Set hostname (overrides rootfs default)
+  - hostnamectl set-hostname CLOUDHOST 2>/dev/null || echo CLOUDHOST > /etc/hostname
+  - sed -i 's/^127.0.0.1.*/127.0.0.1 localhost CLOUDHOST/' /etc/hosts 2>/dev/null || true
+  # Bring up eth0 (configured via kernel args)
+  - ip link set eth0 up
+  - sleep 1
+  - ip addr
+  # Configure SSH for password login
+  - sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - sed -i 's/^ChallengeResponseAuthentication no/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config
+  - systemctl restart ssh
+  - echo "SSH configured" > /tmp/cloud-init-done.txt

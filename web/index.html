@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>pudu — VM terminals</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; background: #1e1e1e; color: #ccc; font-family: monospace; }
+    body { display: flex; flex-direction: column; }
+
+    #tabs {
+      display: flex;
+      background: #2d2d2d;
+      border-bottom: 1px solid #444;
+      flex-shrink: 0;
+    }
+    .tab {
+      padding: 8px 16px;
+      cursor: pointer;
+      color: #aaa;
+      border-right: 1px solid #444;
+      user-select: none;
+    }
+    .tab:hover { background: #3a3a3a; }
+    .tab.active { background: #1e1e1e; color: #fff; border-bottom: 2px solid #4af; margin-bottom: -1px; }
+
+    .content {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+    }
+    .terminal-pane {
+      display: none;
+      flex: 1;
+      min-height: 0;
+    }
+    .terminal-pane.active {
+      display: flex;
+    }
+    #terminal-wrapper {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+      padding: 4px;
+    }
+    .xterm { flex: 1; min-width: 0; }
+    .xterm-screen { width: 100% !important; }
+    .xterm-viewport { overflow-y: hidden !important; }
+
+    #status {
+      flex-shrink: 0;
+      padding: 4px 8px;
+      background: #2d2d2d;
+      font-size: 12px;
+      color: #888;
+      border-top: 1px solid #444;
+    }
+  </style>
+</head>
+<body>
+
+<div id="tabs"></div>
+
+<div class="content" id="content"></div>
+
+<div id="status">connecting...</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script>
+const VM_COUNT = __VM_COUNT__;
+
+const tabs = document.getElementById('tabs');
+const content = document.getElementById('content');
+const status = document.getElementById('status');
+
+const terminals = [];
+
+for (let i = 0; i < VM_COUNT; i++) {
+  // Tab
+  const tab = document.createElement('div');
+  tab.className = 'tab' + (i === 0 ? ' active' : '');
+  tab.textContent = 'vm-' + i;
+  tab.addEventListener('click', () => switchTab(i));
+  tabs.appendChild(tab);
+
+  // Pane
+  const pane = document.createElement('div');
+  pane.className = 'terminal-pane' + (i === 0 ? ' active' : '');
+  pane.id = 'pane-' + i;
+
+  const wrapper = document.createElement('div');
+  wrapper.id = 'terminal-wrapper-' + i;
+  wrapper.style.cssText = 'flex:1;display:flex;overflow:hidden;padding:4px;';
+  pane.appendChild(wrapper);
+  content.appendChild(pane);
+
+  // Terminal
+  const term = new Terminal({
+    cursorBlink: true,
+    theme: { background: '#1e1e1e' },
+    fontSize: 14,
+  });
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(wrapper);
+  // Only fit the first (visible) tab on init; hidden panes have zero dimensions
+  if (i === 0) {
+    requestAnimationFrame(() => fitAddon.fit());
+  }
+
+  let ws = null;
+
+  function connect(vmID, t, fit) {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const socket = new WebSocket(`${proto}://${location.host}/ws?vm=${vmID}`);
+    socket.binaryType = 'arraybuffer';
+
+    socket.addEventListener('open', () => {
+      status.textContent = 'vm-' + vmID + ': connected';
+      fit.fit();
+    });
+
+    socket.addEventListener('message', (ev) => {
+      if (typeof ev.data === 'string') {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'error') {
+            t.writeln('\r\n\x1b[31m' + msg.msg + '\x1b[0m');
+            status.textContent = 'vm-' + vmID + ': ' + msg.msg;
+          }
+        } catch (_) {}
+      } else {
+        t.write(new Uint8Array(ev.data));
+      }
+    });
+
+    socket.addEventListener('close', () => {
+      status.textContent = 'vm-' + vmID + ': disconnected';
+    });
+
+    socket.addEventListener('error', () => {
+      status.textContent = 'vm-' + vmID + ': connection error';
+    });
+
+    t.onData((data) => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(new TextEncoder().encode(data));
+      }
+    });
+
+    t.onResize(({ cols, rows }) => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'resize', cols, rows }));
+      }
+    });
+
+    return socket;
+  }
+
+  ws = connect(i, term, fitAddon);
+  terminals.push({ term, fitAddon, ws });
+}
+
+function switchTab(i) {
+  document.querySelectorAll('.tab').forEach((t, idx) => t.classList.toggle('active', idx === i));
+  document.querySelectorAll('.terminal-pane').forEach((p, idx) => p.classList.toggle('active', idx === i));
+  // Double rAF: first frame makes pane visible, second frame has correct dimensions
+  requestAnimationFrame(() => requestAnimationFrame(() => terminals[i].fitAddon.fit()));
+}
+
+window.addEventListener('resize', () => {
+  const active = document.querySelector('.tab.active');
+  if (active) {
+    const i = [...document.querySelectorAll('.tab')].indexOf(active);
+    terminals[i].fitAddon.fit();
+  }
+});
+
+status.textContent = 'connecting to ' + VM_COUNT + ' VM(s)...';
+</script>
+</body>
+</html>

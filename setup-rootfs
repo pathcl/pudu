@@ -1,0 +1,85 @@
+#!/bin/bash
+set -e
+
+ROOTFS="${1:-rootfs.ext4}"
+AGENT_BIN="${2:-pudu-agent}"
+MOUNTPOINT="/tmp/rootfs-setup-$$"
+
+if [ ! -f "$ROOTFS" ]; then
+    echo "Error: rootfs not found: $ROOTFS" >&2
+    exit 1
+fi
+
+echo "==> Setting up rootfs: $ROOTFS"
+
+# Expand base image to 1GB so there's room to install packages
+echo "==> Expanding rootfs to 1GB..."
+truncate -s 1G "$ROOTFS"
+e2fsck -f -y "$ROOTFS" > /dev/null 2>&1 || true
+resize2fs "$ROOTFS" > /dev/null 2>&1
+
+mkdir -p "$MOUNTPOINT"
+
+sudo mount -o loop "$ROOTFS" "$MOUNTPOINT"
+trap "sudo umount -l $MOUNTPOINT/dev/pts 2>/dev/null; sudo umount -l $MOUNTPOINT/proc 2>/dev/null; sudo umount -l $MOUNTPOINT/sys 2>/dev/null; sudo umount -l $MOUNTPOINT/dev 2>/dev/null; sudo umount -l $MOUNTPOINT 2>/dev/null; sudo rmdir $MOUNTPOINT 2>/dev/null" EXIT
+
+# Bind mount host proc/sys/dev and resolv.conf so chroot has networking and /proc
+sudo mount --bind /proc "$MOUNTPOINT/proc"
+sudo mount --bind /sys "$MOUNTPOINT/sys"
+sudo mount --bind /dev "$MOUNTPOINT/dev"
+sudo mount --bind /dev/pts "$MOUNTPOINT/dev/pts"
+sudo cp /etc/resolv.conf "$MOUNTPOINT/etc/resolv.conf"
+
+# Set root password
+echo "==> Setting root password to 'root'..."
+echo "root:root" | sudo chroot "$MOUNTPOINT" chpasswd
+
+# Use a drop-in so it wins over any default that disables password auth
+echo "==> Configuring SSH for password login..."
+sudo mkdir -p "$MOUNTPOINT/etc/ssh/sshd_config.d"
+cat <<'EOF' | sudo tee "$MOUNTPOINT/etc/ssh/sshd_config.d/99-pudu.conf" > /dev/null
+PermitRootLogin yes
+PasswordAuthentication yes
+UseDNS no
+EOF
+
+# Enable SSH service
+echo "==> Enabling SSH service..."
+sudo chroot "$MOUNTPOINT" systemctl enable ssh > /dev/null 2>&1 || true
+
+# Install pudu-agent
+if [ -f "$AGENT_BIN" ]; then
+    echo "==> Installing pudu-agent..."
+    sudo cp "$AGENT_BIN" "$MOUNTPOINT/usr/local/bin/pudu-agent"
+    sudo chmod +x "$MOUNTPOINT/usr/local/bin/pudu-agent"
+
+    # Install systemd service unit
+    cat <<'UNIT' | sudo tee "$MOUNTPOINT/etc/systemd/system/pudu-agent.service" > /dev/null
+[Unit]
+Description=Pudu Fault Injection Agent
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/pudu-agent
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    sudo chroot "$MOUNTPOINT" systemctl enable pudu-agent > /dev/null 2>&1 || true
+    echo "  ✓ pudu-agent installed and enabled"
+else
+    echo "  (skipping pudu-agent: $AGENT_BIN not found)"
+fi
+
+# Install stress-ng for realistic CPU fault injection (best-effort)
+echo "==> Installing stress-ng (optional, improves CPU fault accuracy)..."
+sudo chroot "$MOUNTPOINT" apt-get install -y --no-install-recommends stress-ng > /dev/null 2>&1 && \
+    echo "  ✓ stress-ng installed" || \
+    echo "  (stress-ng install failed — CPU faults will use pure-Go fallback)"
+
+echo "✓ Rootfs setup complete!"

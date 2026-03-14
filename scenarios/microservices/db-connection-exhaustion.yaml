@@ -1,0 +1,119 @@
+scenario:
+  id: microservices-db-connpool-001
+  title: "Connection Pool Meltdown"
+  difficulty: medium
+  architecture: microservices
+  tags: [database, connection-pool, cascade, microservices]
+  description: |
+    A cascade is unfolding in production. The API tier is returning intermittent
+    errors and response times have spiked. The database appears healthy at a
+    glance, but something is preventing connections from being established.
+    You have 15 minutes before the SLA breach window opens.
+
+environment:
+  tiers:
+    - name: api
+      count: 2
+      vcpus: 1
+      mem_mb: 512
+      services: [nginx, app-server]
+    - name: db
+      count: 1
+      vcpus: 1
+      mem_mb: 512
+      services: [postgresql]
+
+faults:
+  # Stage 1: Saturate the DB CPU at T=0 to slow query processing
+  - id: db-cpu-spike
+    type: cpu
+    target:
+      tier: db
+    params:
+      load: "90%"
+    at: 0s
+    duration: 3m
+
+  # Stage 2: At T=1m inject network latency between api and db tiers
+  # (targets api nodes which originate the DB connections)
+  - id: api-db-latency
+    type: network
+    target:
+      tier: api
+    params:
+      action: delay
+      latency: 300ms
+      jitter: 50ms
+    at: 1m
+    duration: 5m
+
+  # Stage 3: At T=2m, memory pressure on api-0 simulating connection object leak
+  - id: api0-memleak
+    type: memory
+    target:
+      vm: api-0
+    params:
+      rate: "30mb/min"
+      ceiling: "85%"
+    at: 2m
+
+signals:
+  alerts:
+    - name: APIHighLatency
+      severity: critical
+      fired_at: 0s
+      message: "p99 latency on /api/v1/* > 2s for 3 consecutive minutes"
+    - name: DBConnectionErrors
+      severity: critical
+      fired_at: 1m
+      message: "postgresql: too many connections — rejecting new clients"
+    - name: API0MemoryHigh
+      severity: warning
+      fired_at: 2m
+      message: "api-0 memory usage > 75% and rising"
+  symptoms:
+    - "API returns HTTP 503 on ~30% of requests"
+    - "Database logs show 'FATAL: remaining connection slots reserved'"
+    - "api-0 response time is worse than api-1"
+    - "Database CPU shows 90%+ usage in monitoring"
+
+objectives:
+  - id: db-cpu-normal
+    description: DB CPU load average below 2.0
+    check:
+      type: agent-metric
+      target:
+        vm: db-0
+      metric: load_avg_1
+      condition: "< 2.0"
+
+  - id: api0-mem-normal
+    description: api-0 memory usage below 70%
+    check:
+      type: agent-metric
+      target:
+        vm: api-0
+      metric: mem_used_pct
+      condition: "< 70"
+
+  - id: api-healthy
+    description: Both API nodes respond 200 on /healthz
+    check:
+      type: http
+      target:
+        tier: api
+      path: /healthz
+      expected_status: 200
+
+hints:
+  - text: "Start by identifying which layer is the source vs a symptom. Check load averages on all VMs: ssh root@172.16.X.2 'uptime'"
+  - text: "The database CPU spike is the root cause. The network latency and memory leak are secondary effects. Address them in order."
+  - text: "To stop the CPU fault: curl -X POST http://172.16.2.2:7777/fault/stop -d '{\"id\":\"db-cpu-spike\"}'"
+  - text: "To stop the network fault on api nodes: POST /fault/stop with id=api-db-latency to both api-0 (172.16.0.2) and api-1 (172.16.1.2)"
+  - text: "The memory leak on api-0 will stop automatically when you POST /fault/stop with id=api0-memleak to 172.16.0.2:7777"
+
+scoring:
+  base: 100
+  time_penalty_per_second: 0.033
+  hint_penalty: 10
+  perfect_window: 8m
