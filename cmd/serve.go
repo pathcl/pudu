@@ -107,7 +107,7 @@ func StartWebTerminal(ctx context.Context, vmCount, port int) {
 		server.Shutdown(shutdownCtx) //nolint:errcheck
 	}()
 
-	fmt.Fprintf(os.Stderr, "\n==> WebSSH server: http://192.168.50.100:%d\n", port)
+	fmt.Fprintf(os.Stderr, "\n==> WebSSH server: http://labs.sanmartin.io:%d\n", port)
 	fmt.Fprintf(os.Stderr, "Press Ctrl+C to stop\n\n")
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
