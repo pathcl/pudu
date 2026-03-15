@@ -129,6 +129,7 @@ func (s *Server) createFleet(w http.ResponseWriter, r *http.Request) {
 
 		s.mu.Lock()
 		entry.Status = "stopped"
+		s.releaseVMIDs(entry.vmIDs)
 		s.mu.Unlock()
 	}()
 
@@ -166,8 +167,10 @@ func (s *Server) deleteFleet(w http.ResponseWriter, r *http.Request, id string) 
 	entry, ok := s.fleets[id]
 	if ok {
 		entry.cancel()
-		entry.Status = "stopped"
-		s.releaseVMIDs(entry.vmIDs)
+		if entry.Status != "stopped" {
+			entry.Status = "stopped"
+			s.releaseVMIDs(entry.vmIDs)
+		}
 	}
 	s.mu.Unlock()
 

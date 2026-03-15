@@ -49,7 +49,13 @@ func RemoveTAP(id int) {
 }
 
 func isAlreadyExists(msg string) bool {
-	for _, s := range []string{"already exists", "RTNETLINK answers: File exists", "File exists"} {
+	for _, s := range []string{
+		"already exists",
+		"RTNETLINK answers: File exists",
+		"File exists",
+		"Device or resource busy",
+		"TUNSETIFF",
+	} {
 		if contains(msg, s) {
 			return true
 		}
