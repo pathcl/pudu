@@ -244,6 +244,20 @@ func (r *Runner) RequestHint() {
 	fmt.Printf("(-%d points)\n", r.Scenario.Scoring.HintPenalty)
 }
 
+// RequestHintText returns the next unused hint text and deducts points.
+// Returns an empty string if no hints remain.
+func (r *Runner) RequestHintText() string {
+	r.mu.Lock()
+	idx := r.hintsUsed
+	r.hintsUsed++
+	r.mu.Unlock()
+
+	if idx >= len(r.Scenario.Hints) {
+		return ""
+	}
+	return r.Scenario.Hints[idx].Text
+}
+
 // CurrentScore returns the live score.
 func (r *Runner) CurrentScore() int {
 	r.mu.Lock()

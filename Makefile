@@ -7,6 +7,7 @@ FC_INSTALL_DIR  := /usr/local/bin
 KERNEL      := vmlinux.bin
 ROOTFS      := rootfs.ext4
 BINARY      := pudu
+CLIENT_BIN  := puduc/puduc
 AGENT_BIN   := pudu-agent
 CLOUD_INIT_ISO := cloud-init.iso
 CLOUD_INIT_CONFIG := cloud-init-config.yaml
@@ -24,7 +25,7 @@ KERNEL_ARGS := "console=ttyS0 reboot=k panic=1 pci=off ip=$(VM_IP)::$(TAP_IP):$(
 # Multi-VM configuration
 N           ?= 3
 
-.PHONY: build agent run assets net-up net-down clean net-up-multi net-down-multi run-multi serve cloud-init-iso update cleanup scenario deps
+.PHONY: build build-puduc agent run assets net-up net-down clean net-up-multi net-down-multi run-multi serve cloud-init-iso update cleanup scenario server deps
 
 deps:
 	@echo "==> Installing firecracker $(FC_VERSION)"
@@ -45,6 +46,10 @@ deps:
 build:
 	go build -o $(BINARY) .
 	go build -o $(AGENT_BIN) ./agent/
+	go build -o $(CLIENT_BIN) ./puduc/
+
+build-puduc:
+	go build -o $(CLIENT_BIN) ./puduc/
 
 agent: $(AGENT_BIN)
 
@@ -160,8 +165,15 @@ scenario: assets net-up-multi
 	  --cloud-init-iso $(CLOUD_INIT_ISO) \
 	  $(SCENARIO)
 
+server: assets net-up-multi
+	sudo ./$(BINARY) server \
+	  --kernel $(KERNEL) \
+	  --rootfs $(ROOTFS) \
+	  --cloud-init-iso $(CLOUD_INIT_ISO) \
+	  --port 8888
+
 cleanup: net-down-multi
 	@echo "==> Network cleaned up"
 
 clean: net-down
-	rm -f $(BINARY) $(AGENT_BIN) $(KERNEL) $(ROOTFS) $(CLOUD_INIT_ISO) cloud-init-*.iso vm-*.log vm-*.ext4
+	rm -f $(BINARY) $(CLIENT_BIN) $(AGENT_BIN) $(KERNEL) $(ROOTFS) $(CLOUD_INIT_ISO) cloud-init-*.iso vm-*.log vm-*.ext4 puduc/puduc

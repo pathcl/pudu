@@ -14,7 +14,7 @@ import (
 // Execute parses args and runs the appropriate subcommand.
 func Execute() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: pudu <command> [flags]\n\nCommands:\n  run       Launch a Firecracker microVM\n  serve     Launch VMs and start WebSSH server\n  scenario  Run an incident simulation scenario\n")
+		fmt.Fprintf(os.Stderr, "Usage: pudu <command> [flags]\n\nCommands:\n  run       Launch a Firecracker microVM\n  serve     Launch VMs and start WebSSH server\n  scenario  Run an incident simulation scenario\n  server    Start the REST API server\n")
 		os.Exit(1)
 	}
 
@@ -25,6 +25,8 @@ func Execute() {
 		serveCmd(os.Args[2:])
 	case "scenario":
 		scenarioCmd(os.Args[2:])
+	case "server":
+		serverCmd(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		os.Exit(1)
