@@ -31,10 +31,12 @@ func EnsureTAP(id int) error {
 		}
 	}
 
-	// Idempotent MASQUERADE rule: check before adding
-	check := exec.Command("iptables", "-t", "nat", "-C", "POSTROUTING", "-j", "MASQUERADE")
+	// Idempotent MASQUERADE rule: check before adding.
+	// -w makes iptables wait for the xtables lock instead of failing
+	// with exit code 4 when multiple goroutines call this concurrently.
+	check := exec.Command("iptables", "-w", "-t", "nat", "-C", "POSTROUTING", "-j", "MASQUERADE")
 	if err := check.Run(); err != nil {
-		add := exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-j", "MASQUERADE")
+		add := exec.Command("iptables", "-w", "-t", "nat", "-A", "POSTROUTING", "-j", "MASQUERADE")
 		if out, err := add.CombinedOutput(); err != nil {
 			return fmt.Errorf("iptables MASQUERADE: %w\n%s", err, out)
 		}
