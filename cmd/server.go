@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -62,16 +61,14 @@ func serverCmd(args []string) {
 		WSHandler(r.Context(), conn, vmID)
 	})
 
-	// Web UI — injects live VM count so tabs reflect current fleet
+	// Web UI — served as-is; JS polls /api/v1/fleets for live VM list
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
-		vmCount := srv.TotalVMs()
-		html := strings.ReplaceAll(string(web.IndexHTML), "__VM_COUNT__", strconv.Itoa(vmCount))
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(html)) //nolint:errcheck
+		w.Write(web.IndexHTML) //nolint:errcheck
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

@@ -10,11 +10,23 @@
     html, body { height: 100%; background: #1e1e1e; color: #ccc; font-family: monospace; }
     body { display: flex; flex-direction: column; }
 
+    #header {
+      display: flex;
+      align-items: center;
+      background: #252526;
+      border-bottom: 1px solid #444;
+      flex-shrink: 0;
+      padding: 0 8px;
+      gap: 8px;
+    }
+    #header span { font-size: 12px; color: #666; padding: 6px 0; }
+
     #tabs {
       display: flex;
       background: #2d2d2d;
       border-bottom: 1px solid #444;
       flex-shrink: 0;
+      overflow-x: auto;
     }
     .tab {
       padding: 8px 16px;
@@ -22,9 +34,14 @@
       color: #aaa;
       border-right: 1px solid #444;
       user-select: none;
+      white-space: nowrap;
+      font-size: 13px;
     }
     .tab:hover { background: #3a3a3a; }
     .tab.active { background: #1e1e1e; color: #fff; border-bottom: 2px solid #4af; margin-bottom: -1px; }
+    .tab .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; background: #555; }
+    .tab.connected .dot { background: #4c4; }
+    .tab.error .dot { background: #c44; }
 
     .content {
       flex: 1;
@@ -36,10 +53,9 @@
       flex: 1;
       min-height: 0;
     }
-    .terminal-pane.active {
-      display: flex;
-    }
-    #terminal-wrapper {
+    .terminal-pane.active { display: flex; }
+
+    .terminal-wrapper {
       flex: 1;
       display: flex;
       overflow: hidden;
@@ -49,6 +65,18 @@
     .xterm-screen { width: 100% !important; }
     .xterm-viewport { overflow-y: hidden !important; }
 
+    #empty {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: #555;
+      gap: 12px;
+    }
+    #empty h2 { color: #777; font-weight: normal; }
+    #empty code { background: #2a2a2a; padding: 4px 8px; border-radius: 3px; color: #9cf; }
+
     #status {
       flex-shrink: 0;
       padding: 4px 8px;
@@ -56,48 +84,125 @@
       font-size: 12px;
       color: #888;
       border-top: 1px solid #444;
+      display: flex;
+      justify-content: space-between;
     }
+    #status a { color: #4af; text-decoration: none; }
+    #status a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
 
+<div id="header">
+  <span>pudu</span>
+  <span id="fleet-summary">loading...</span>
+</div>
+
 <div id="tabs"></div>
+<div class="content" id="content">
+  <div id="empty">
+    <h2>No VMs running</h2>
+    <p>Create a fleet with:</p>
+    <code>puduc fleet create --count 2</code>
+    <p style="color:#444;font-size:12px">This page refreshes automatically.</p>
+  </div>
+</div>
 
-<div class="content" id="content"></div>
-
-<div id="status">connecting...</div>
+<div id="status">
+  <span id="status-text">waiting for VMs...</span>
+  <span><a href="/api/v1/openapi.yaml" target="_blank">OpenAPI spec</a> · <a href="/api/v1/fleets" target="_blank">fleets JSON</a></span>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
 <script>
-const VM_COUNT = __VM_COUNT__;
+// Map of "vm-N" → { term, fitAddon, ws, tabEl, paneEl, connected }
+const vmTerminals = {};
+let activeVMKey = null;
 
-const tabs = document.getElementById('tabs');
-const content = document.getElementById('content');
-const status = document.getElementById('status');
+const tabsEl        = document.getElementById('tabs');
+const contentEl     = document.getElementById('content');
+const emptyEl       = document.getElementById('empty');
+const statusText    = document.getElementById('status-text');
+const fleetSummary  = document.getElementById('fleet-summary');
 
-const terminals = [];
+// ── Fleet polling ────────────────────────────────────────────────────────────
 
-for (let i = 0; i < VM_COUNT; i++) {
+async function fetchVMs() {
+  try {
+    const resp = await fetch('/api/v1/fleets');
+    if (!resp.ok) return [];
+    const fleets = await resp.json();
+    const vms = [];
+    for (const fleet of fleets || []) {
+      if (fleet.status === 'running' || fleet.status === 'starting') {
+        for (const vm of fleet.vms || []) {
+          vms.push({ fleetID: fleet.id, vmID: vm.id, ip: vm.ip, fleetStatus: fleet.status });
+        }
+      }
+    }
+    return vms;
+  } catch (e) {
+    return [];
+  }
+}
+
+async function syncVMs() {
+  const vms = await fetchVMs();
+
+  // Update header summary
+  const runningFleets = new Set(vms.map(v => v.fleetID)).size;
+  if (vms.length === 0) {
+    fleetSummary.textContent = 'no running VMs';
+  } else {
+    fleetSummary.textContent = `${vms.length} VM${vms.length !== 1 ? 's' : ''} across ${runningFleets} fleet${runningFleets !== 1 ? 's' : ''}`;
+  }
+
+  const currentKeys = new Set(vms.map(v => `vm-${v.vmID}`));
+
+  // Remove terminals for VMs that no longer exist
+  for (const key of Object.keys(vmTerminals)) {
+    if (!currentKeys.has(key)) {
+      removeTerminal(key);
+    }
+  }
+
+  // Add terminals for new VMs
+  for (const vm of vms) {
+    const key = `vm-${vm.vmID}`;
+    if (!vmTerminals[key]) {
+      addTerminal(vm.vmID, vm.ip);
+    }
+  }
+
+  // Show/hide empty state
+  const hasVMs = Object.keys(vmTerminals).length > 0;
+  emptyEl.style.display = hasVMs ? 'none' : 'flex';
+}
+
+// ── Terminal management ───────────────────────────────────────────────────────
+
+function addTerminal(vmID, ip) {
+  const key = `vm-${vmID}`;
+
   // Tab
   const tab = document.createElement('div');
-  tab.className = 'tab' + (i === 0 ? ' active' : '');
-  tab.textContent = 'vm-' + i;
-  tab.addEventListener('click', () => switchTab(i));
-  tabs.appendChild(tab);
+  tab.className = 'tab';
+  tab.innerHTML = `<span class="dot"></span>vm-${vmID}`;
+  tab.title = ip;
+  tab.addEventListener('click', () => switchTab(key));
+  tabsEl.appendChild(tab);
 
   // Pane
   const pane = document.createElement('div');
-  pane.className = 'terminal-pane' + (i === 0 ? ' active' : '');
-  pane.id = 'pane-' + i;
-
+  pane.className = 'terminal-pane';
+  pane.id = `pane-${key}`;
   const wrapper = document.createElement('div');
-  wrapper.id = 'terminal-wrapper-' + i;
-  wrapper.style.cssText = 'flex:1;display:flex;overflow:hidden;padding:4px;';
+  wrapper.className = 'terminal-wrapper';
   pane.appendChild(wrapper);
-  content.appendChild(pane);
+  contentEl.appendChild(pane);
 
-  // Terminal
+  // xterm
   const term = new Terminal({
     cursorBlink: true,
     theme: { background: '#1e1e1e' },
@@ -106,80 +211,112 @@ for (let i = 0; i < VM_COUNT; i++) {
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(wrapper);
-  // Only fit the first (visible) tab on init; hidden panes have zero dimensions
-  if (i === 0) {
+
+  vmTerminals[key] = { term, fitAddon, ws: null, tabEl: tab, paneEl: pane, connected: false };
+
+  // Switch to first VM automatically
+  if (activeVMKey === null) {
+    switchTab(key);
     requestAnimationFrame(() => fitAddon.fit());
   }
 
-  let ws = null;
-
-  function connect(vmID, t, fit) {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const socket = new WebSocket(`${proto}://${location.host}/ws?vm=${vmID}`);
-    socket.binaryType = 'arraybuffer';
-
-    socket.addEventListener('open', () => {
-      status.textContent = 'vm-' + vmID + ': connected';
-      fit.fit();
-    });
-
-    socket.addEventListener('message', (ev) => {
-      if (typeof ev.data === 'string') {
-        try {
-          const msg = JSON.parse(ev.data);
-          if (msg.type === 'error') {
-            t.writeln('\r\n\x1b[31m' + msg.msg + '\x1b[0m');
-            status.textContent = 'vm-' + vmID + ': ' + msg.msg;
-          }
-        } catch (_) {}
-      } else {
-        t.write(new Uint8Array(ev.data));
-      }
-    });
-
-    socket.addEventListener('close', () => {
-      status.textContent = 'vm-' + vmID + ': disconnected';
-    });
-
-    socket.addEventListener('error', () => {
-      status.textContent = 'vm-' + vmID + ': connection error';
-    });
-
-    t.onData((data) => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(new TextEncoder().encode(data));
-      }
-    });
-
-    t.onResize(({ cols, rows }) => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'resize', cols, rows }));
-      }
-    });
-
-    return socket;
-  }
-
-  ws = connect(i, term, fitAddon);
-  terminals.push({ term, fitAddon, ws });
+  connectWebSocket(key, vmID);
 }
 
-function switchTab(i) {
-  document.querySelectorAll('.tab').forEach((t, idx) => t.classList.toggle('active', idx === i));
-  document.querySelectorAll('.terminal-pane').forEach((p, idx) => p.classList.toggle('active', idx === i));
-  // Double rAF: first frame makes pane visible, second frame has correct dimensions
-  requestAnimationFrame(() => requestAnimationFrame(() => terminals[i].fitAddon.fit()));
+function removeTerminal(key) {
+  const t = vmTerminals[key];
+  if (!t) return;
+  if (t.ws) t.ws.close();
+  t.term.dispose();
+  t.tabEl.remove();
+  t.paneEl.remove();
+  delete vmTerminals[key];
+  if (activeVMKey === key) {
+    activeVMKey = null;
+    const remaining = Object.keys(vmTerminals);
+    if (remaining.length > 0) switchTab(remaining[0]);
+  }
+}
+
+function connectWebSocket(key, vmID) {
+  const t = vmTerminals[key];
+  if (!t) return;
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws?vm=${vmID}`);
+  ws.binaryType = 'arraybuffer';
+  t.ws = ws;
+
+  ws.addEventListener('open', () => {
+    t.connected = true;
+    t.tabEl.className = 'tab connected' + (activeVMKey === key ? ' active' : '');
+    statusText.textContent = `${key}: connected (${t.term.cols}×${t.term.rows})`;
+    t.fitAddon.fit();
+  });
+
+  ws.addEventListener('message', (ev) => {
+    if (typeof ev.data === 'string') {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'error') {
+          t.term.writeln('\r\n\x1b[31m' + msg.msg + '\x1b[0m');
+          t.tabEl.className = 'tab error' + (activeVMKey === key ? ' active' : '');
+          statusText.textContent = `${key}: ${msg.msg}`;
+        }
+      } catch (_) {}
+    } else {
+      t.term.write(new Uint8Array(ev.data));
+    }
+  });
+
+  ws.addEventListener('close', () => {
+    t.connected = false;
+    t.tabEl.className = 'tab' + (activeVMKey === key ? ' active' : '');
+    statusText.textContent = `${key}: disconnected`;
+    // Retry after 5s if VM entry still exists
+    setTimeout(() => { if (vmTerminals[key]) connectWebSocket(key, vmID); }, 5000);
+  });
+
+  ws.addEventListener('error', () => {
+    t.tabEl.className = 'tab error' + (activeVMKey === key ? ' active' : '');
+  });
+
+  t.term.onData((data) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(new TextEncoder().encode(data));
+    }
+  });
+
+  t.term.onResize(({ cols, rows }) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+    }
+  });
+}
+
+function switchTab(key) {
+  activeVMKey = key;
+  for (const [k, t] of Object.entries(vmTerminals)) {
+    const isActive = k === key;
+    const base = 'tab' + (t.connected ? ' connected' : t.tabEl.className.includes('error') ? ' error' : '');
+    t.tabEl.className = base + (isActive ? ' active' : '');
+    t.paneEl.classList.toggle('active', isActive);
+    if (isActive) {
+      requestAnimationFrame(() => requestAnimationFrame(() => t.fitAddon.fit()));
+    }
+  }
 }
 
 window.addEventListener('resize', () => {
-  const active = document.querySelector('.tab.active');
-  if (active) {
-    const i = [...document.querySelectorAll('.tab')].indexOf(active);
-    terminals[i].fitAddon.fit();
+  if (activeVMKey && vmTerminals[activeVMKey]) {
+    vmTerminals[activeVMKey].fitAddon.fit();
   }
 });
 
-status.textContent = 'connecting to ' + VM_COUNT + ' VM(s)...';
+// ── Boot ─────────────────────────────────────────────────────────────────────
+
+syncVMs();
+setInterval(syncVMs, 5000);   // re-check fleet state every 5 seconds
 </script>
 </body>
 </html>

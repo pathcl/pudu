@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -72,9 +71,8 @@ func StartWebTerminal(ctx context.Context, vmCount, port int) {
 			http.NotFound(w, r)
 			return
 		}
-		html := strings.ReplaceAll(string(web.IndexHTML), "__VM_COUNT__", strconv.Itoa(vmCount))
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(html)) //nolint:errcheck
+		w.Write(web.IndexHTML) //nolint:errcheck
 	})
 
 	upgrader := websocket.Upgrader{
