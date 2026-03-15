@@ -28,6 +28,7 @@ type FleetEntry struct {
 	VMs       []VMStatus `json:"vms"`
 	WebPort   int        `json:"web_port"`
 	CreatedAt time.Time  `json:"created_at"`
+	vmIDs     []int      // allocated IDs, released on delete
 	cancel    context.CancelFunc
 }
 
@@ -95,24 +96,26 @@ func (s *Server) createFleet(w http.ResponseWriter, r *http.Request) {
 		cfg.VCPUs = req.VCPUs
 	}
 
-	id := uuid.New().String()
-	vms := make([]VMStatus, req.Count)
-	for i := 0; i < req.Count; i++ {
-		vms[i] = VMStatus{ID: i, IP: fmt.Sprintf("172.16.%d.2", i)}
+	// Allocate non-overlapping VM IDs under the lock
+	s.mu.Lock()
+	vmIDs := s.allocateVMIDs(req.Count)
+
+	vms := make([]VMStatus, len(vmIDs))
+	for i, id := range vmIDs {
+		vms[i] = VMStatus{ID: id, IP: fmt.Sprintf("172.16.%d.2", id)}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	entry := &FleetEntry{
-		ID:        id,
+		ID:        uuid.New().String(),
 		Count:     req.Count,
 		Status:    "starting",
 		VMs:       vms,
 		CreatedAt: time.Now(),
+		vmIDs:     vmIDs,
 		cancel:    cancel,
 	}
-
-	s.mu.Lock()
-	s.fleets[id] = entry
+	s.fleets[entry.ID] = entry
 	s.mu.Unlock()
 
 	go func() {
@@ -120,8 +123,8 @@ func (s *Server) createFleet(w http.ResponseWriter, r *http.Request) {
 		entry.Status = "running"
 		s.mu.Unlock()
 
-		if err := launchFleet(ctx, cfg, req.Count); err != nil && ctx.Err() == nil {
-			fmt.Fprintf(os.Stderr, "fleet %s error: %v\n", id, err)
+		if err := launchFleet(ctx, cfg, vmIDs, vm.New); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "fleet %s error: %v\n", entry.ID, err)
 		}
 
 		s.mu.Lock()
@@ -164,6 +167,7 @@ func (s *Server) deleteFleet(w http.ResponseWriter, r *http.Request, id string) 
 	if ok {
 		entry.cancel()
 		entry.Status = "stopped"
+		s.releaseVMIDs(entry.vmIDs)
 	}
 	s.mu.Unlock()
 
@@ -174,16 +178,24 @@ func (s *Server) deleteFleet(w http.ResponseWriter, r *http.Request, id string) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// launchFleet launches N VMs in parallel using goroutines.
-func launchFleet(ctx context.Context, baseCfg vm.Config, count int) error {
+// launchFleet launches VMs for the given vmIDs in parallel using the provided factory.
+// Using vm.Factory instead of vm.New directly makes this testable without Firecracker.
+func launchFleet(ctx context.Context, baseCfg vm.Config, vmIDs []int, factory vm.Factory) error {
 	var wg sync.WaitGroup
-	errChan := make(chan error, count)
+	errChan := make(chan error, len(vmIDs))
 
-	for i := 0; i < count; i++ {
+	for _, id := range vmIDs {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
 			cfg := baseCfg.ForVM(id)
+
+			if err := vm.EnsureTAP(id); err != nil {
+				if ctx.Err() == nil {
+					errChan <- fmt.Errorf("VM %d: tap setup: %w", id, err)
+				}
+				return
+			}
 
 			vmRootFS, err := vm.PrepareRootFS(baseCfg.RootFSPath, id, baseCfg.RootFSSizeMiB)
 			if err != nil {
@@ -195,14 +207,7 @@ func launchFleet(ctx context.Context, baseCfg vm.Config, count int) error {
 			defer os.Remove(vmRootFS)
 			cfg.RootFSPath = vmRootFS
 
-			if err := vm.EnsureTAP(id); err != nil {
-				if ctx.Err() == nil {
-					errChan <- fmt.Errorf("VM %d: tap setup: %w", id, err)
-				}
-				return
-			}
-
-			m, err := vm.New(ctx, cfg)
+			m, err := factory(ctx, cfg)
 			if err != nil {
 				if ctx.Err() == nil {
 					errChan <- fmt.Errorf("VM %d: create: %w", id, err)
@@ -221,7 +226,7 @@ func launchFleet(ctx context.Context, baseCfg vm.Config, count int) error {
 			if err := m.Wait(ctx); err != nil && ctx.Err() == nil {
 				errChan <- fmt.Errorf("VM %d: exited: %w", id, err)
 			}
-		}(i)
+		}(id)
 	}
 
 	go func() {

@@ -1,0 +1,53 @@
+scenario:
+  id: test-001
+  title: "Minimal test scenario"
+  difficulty: easy
+  architecture: monolith
+  tags: [test]
+  description: |
+    A minimal scenario used only for unit tests.
+
+environment:
+  tiers:
+    - name: app
+      count: 1
+      vcpus: 1
+      mem_mb: 512
+
+faults:
+  - id: disk-fill
+    type: disk
+    target:
+      tier: app
+    params:
+      path: /
+    at: 0s
+
+signals:
+  alerts:
+    - name: DiskFull
+      severity: critical
+      fired_at: 0s
+      message: "Disk at 100%"
+  symptoms:
+    - "App returns 500"
+
+objectives:
+  - id: disk-ok
+    description: Disk usage below 80%
+    check:
+      type: agent-metric
+      target:
+        tier: app
+      metric: disk_used_pct
+      condition: "< 80"
+
+hints:
+  - text: "Check disk usage with: df -h"
+  - text: "Look for large files: du -sh /*"
+
+scoring:
+  base: 100
+  time_penalty_per_second: 0.05
+  hint_penalty: 10
+  perfect_window: 5m

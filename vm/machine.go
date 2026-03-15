@@ -20,7 +20,8 @@ type Machine struct {
 }
 
 // New creates a new Machine from the given Config.
-func New(ctx context.Context, cfg Config) (*Machine, error) {
+// It satisfies the Factory type signature.
+func New(ctx context.Context, cfg Config) (VM, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
