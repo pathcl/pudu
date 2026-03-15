@@ -68,6 +68,17 @@ func launchFleet(ctx context.Context, baseCfg vm.Config, count int) error {
 				return
 			}
 
+			if baseCfg.CloudInitISO != "" {
+				isoPath := cfg.CloudInitISO
+				hostname := fmt.Sprintf("vm-%d", id)
+				if err := vm.EnsureCloudInitISO(isoPath, "cloud-init-config.yaml", hostname); err != nil {
+					if ctx.Err() == nil {
+						errChan <- fmt.Errorf("VM %d: cloud-init ISO: %w", id, err)
+					}
+					return
+				}
+			}
+
 			m, err := vm.New(ctx, cfg)
 			if err != nil {
 				if ctx.Err() == nil {

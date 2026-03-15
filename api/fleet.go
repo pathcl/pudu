@@ -123,7 +123,7 @@ func (s *Server) createFleet(w http.ResponseWriter, r *http.Request) {
 		entry.Status = "running"
 		s.mu.Unlock()
 
-		if err := launchFleet(ctx, cfg, vmIDs, vm.New); err != nil && ctx.Err() == nil {
+		if err := launchFleet(ctx, cfg, vmIDs, s.deps); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "fleet %s error: %v\n", entry.ID, err)
 		}
 
@@ -178,9 +178,10 @@ func (s *Server) deleteFleet(w http.ResponseWriter, r *http.Request, id string) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// launchFleet launches VMs for the given vmIDs in parallel using the provided factory.
-// Using vm.Factory instead of vm.New directly makes this testable without Firecracker.
-func launchFleet(ctx context.Context, baseCfg vm.Config, vmIDs []int, factory vm.Factory) error {
+// launchFleet launches VMs for the given vmIDs in parallel.
+// All system calls are routed through deps, making the function testable
+// without Firecracker, root privileges, or real filesystem images.
+func launchFleet(ctx context.Context, baseCfg vm.Config, vmIDs []int, deps LaunchDeps) error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(vmIDs))
 
@@ -190,14 +191,26 @@ func launchFleet(ctx context.Context, baseCfg vm.Config, vmIDs []int, factory vm
 			defer wg.Done()
 			cfg := baseCfg.ForVM(id)
 
-			if err := vm.EnsureTAP(id); err != nil {
+			if err := deps.EnsureTAP(id); err != nil {
 				if ctx.Err() == nil {
 					errChan <- fmt.Errorf("VM %d: tap setup: %w", id, err)
 				}
 				return
 			}
 
-			vmRootFS, err := vm.PrepareRootFS(baseCfg.RootFSPath, id, baseCfg.RootFSSizeMiB)
+			// Generate per-VM cloud-init ISO on demand (may not exist for higher IDs)
+			if baseCfg.CloudInitISO != "" {
+				isoPath := cfg.CloudInitISO // already set to cloud-init-{id}.iso by ForVM
+				hostname := fmt.Sprintf("vm-%d", id)
+				if err := deps.EnsureISO(isoPath, "cloud-init-config.yaml", hostname); err != nil {
+					if ctx.Err() == nil {
+						errChan <- fmt.Errorf("VM %d: cloud-init ISO: %w", id, err)
+					}
+					return
+				}
+			}
+
+			vmRootFS, err := deps.PrepareRootFS(baseCfg.RootFSPath, id, baseCfg.RootFSSizeMiB)
 			if err != nil {
 				if ctx.Err() == nil {
 					errChan <- fmt.Errorf("VM %d: prepare rootfs: %w", id, err)
@@ -207,7 +220,7 @@ func launchFleet(ctx context.Context, baseCfg vm.Config, vmIDs []int, factory vm
 			defer os.Remove(vmRootFS)
 			cfg.RootFSPath = vmRootFS
 
-			m, err := factory(ctx, cfg)
+			m, err := deps.Factory(ctx, cfg)
 			if err != nil {
 				if ctx.Err() == nil {
 					errChan <- fmt.Errorf("VM %d: create: %w", id, err)

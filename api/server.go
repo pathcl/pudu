@@ -7,6 +7,25 @@ import (
 	"github.com/pathcl/pudu/vm"
 )
 
+// LaunchDeps holds all side-effectful dependencies of launchFleet.
+// Production code uses DefaultLaunchDeps(); tests substitute no-ops.
+type LaunchDeps struct {
+	Factory       vm.Factory
+	EnsureTAP     func(id int) error
+	PrepareRootFS func(base string, id int, sizeMiB int64) (string, error)
+	EnsureISO     func(dst, src, hostname string) error
+}
+
+// DefaultLaunchDeps returns the real implementations for production use.
+func DefaultLaunchDeps() LaunchDeps {
+	return LaunchDeps{
+		Factory:       vm.New,
+		EnsureTAP:     vm.EnsureTAP,
+		PrepareRootFS: vm.PrepareRootFS,
+		EnsureISO:     vm.EnsureCloudInitISO,
+	}
+}
+
 // Server holds all in-memory state for the REST API.
 type Server struct {
 	mu        sync.RWMutex
@@ -14,15 +33,23 @@ type Server struct {
 	scenarios map[string]*ScenarioEntry
 	baseCfg   vm.Config
 	usedIDs   map[int]bool // globally tracks which VM IDs are in use
+	deps      LaunchDeps
 }
 
 // NewServer creates an API server with the given base VM configuration.
 func NewServer(baseCfg vm.Config) *Server {
+	return NewServerWithDeps(baseCfg, DefaultLaunchDeps())
+}
+
+// NewServerWithDeps creates a Server with explicit launch dependencies.
+// Use this in tests to inject FakeVM and no-op system calls.
+func NewServerWithDeps(baseCfg vm.Config, deps LaunchDeps) *Server {
 	return &Server{
 		fleets:    make(map[string]*FleetEntry),
 		scenarios: make(map[string]*ScenarioEntry),
 		baseCfg:   baseCfg,
 		usedIDs:   make(map[int]bool),
+		deps:      deps,
 	}
 }
 
