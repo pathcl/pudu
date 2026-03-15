@@ -16,147 +16,137 @@ Pudu launches fleets of lightweight VMs, injects realistic production failures (
 | `/dev/kvm` accessible | Run as root or add user to `kvm` group |
 | Go 1.21+ | To build from source |
 
-Install all dependencies (firecracker, cloud-image-utils, iproute2, iptables) with:
+## From-scratch setup
 
 ```bash
+# 1. Install system dependencies (firecracker, iproute2, iptables, cloud-image-utils)
 make deps
+
+# 2. Build binaries (run as your regular user — Go is not in root's PATH)
+make build          # produces: pudu, pudu-agent, puduc/puduc
+
+# 3. Download kernel + Ubuntu 22.04 rootfs, install agent into rootfs
+make assets         # ~500 MB download, takes a few minutes
 ```
 
-## Quickstart
+That's it. TAP networking is created automatically when VMs launch — no manual `net-up` step needed.
 
-You can use pudu to launch microVMs in parallel and access them through ssh or web terminal.
+## SSH credentials
 
-```bash
-# 1. Build binaries, download kernel + Ubuntu 22.04 rootfs, install agent
-make build    # no sudo — Go is not in root's PATH
-make assets   # no sudo — downloads kernel + rootfs, installs agent into rootfs
-N=2 make serve # launch fleet + web terminal
 ```
-
-After running `make serve`, you can access the terminal at **http://localhost:8888** and investigate.
-
-Also you should be able to:
-
-```bash
-root@172.16.0.2
-```
-
-## SSH Credentials
-```bash
 User: root
 Password: root
 ```
 
-## Scenarios/playground
+---
 
-### Easy scenario — disk full (1 VM, monolith)
+## Usage: REST API server + puduc client
+
+Start the server (needs root for Firecracker + TAP):
 
 ```bash
-# 1. Build binaries, download kernel + Ubuntu 22.04 rootfs, install agent
-make build    # no sudo — Go is not in root's PATH
-make assets   # no sudo — downloads kernel + rootfs, installs agent into rootfs
+make server
+# or manually:
+sudo ./pudu server --kernel vmlinux.bin --rootfs rootfs.ext4 --cloud-init-iso cloud-init.iso --port 8888
+```
 
-# 2. Launch the scenario (sets up TAP networking and starts VMs)
+From another terminal, use `puduc` (no root required):
+
+```bash
+# Install to PATH for convenience
+sudo cp puduc/puduc /usr/local/bin/puduc
+
+# Launch a fleet of 2 VMs
+puduc fleet create --count 2
+
+# List fleets
+puduc fleet list
+
+# Stop a fleet
+puduc fleet delete <id>
+
+# Run a scenario
+puduc scenario run scenarios/monolith/disk-full.yaml
+
+# Check live status + score
+puduc scenario status <id>
+
+# Request a hint (costs points)
+puduc scenario hint <id>
+
+# Abort a scenario
+puduc scenario abort <id>
+
+# Point puduc at a remote server
+export PUDU_SERVER=http://192.168.1.10:8888
+```
+
+---
+
+## Usage: direct CLI (no server)
+
+### Single VM
+
+```bash
+sudo ./pudu run --kernel vmlinux.bin --rootfs rootfs.ext4 --cloud-init-iso cloud-init.iso
+```
+
+### Fleet + web terminal
+
+```bash
+N=3 make serve
+# open http://localhost:8888
+```
+
+### Scenario
+
+```bash
+# Easy — disk full (1 VM, monolith)
 sudo make scenario SCENARIO=scenarios/monolith/disk-full.yaml
+
+# Medium — DB connection cascade (3 VMs, microservices)
+sudo make scenario SCENARIO=scenarios/microservices/db-connection-exhaustion.yaml
 ```
 
-> Run `make build` and `make assets` without sudo every time you start fresh or rebuild.
-> `sudo make scenario` skips the build step and only runs operations that need root.
+Once running, open **http://localhost:8888** in your browser and investigate.
 
-Once running, open the browser terminal at **http://localhost:8888** and investigate:
-
-```bash
-df -h                    # disk is 100% full
-ls -la /                 # spot the hidden .pudu-diskfill file
-rm /.pudu-diskfill       # fix it
-```
-
-The scenario detects disk usage < 80% and prints your score.
-
-### Medium scenario — DB connection cascade (3 VMs, microservices)
-
-```bash
-make build
-sudo make scenario N=3 SCENARIO=scenarios/microservices/db-connection-exhaustion.yaml
-```
-
-Three VMs are launched: `api-0`, `api-1`, `db-0`. Faults inject in stages — a CPU spike on the DB at T=0, network latency at T=1m, and a memory leak on api-0 at T=2m. Use the browser terminal or SSH to diagnose the cascade and stop each fault via the agent API.
-
-### Teardown
-
-```bash
-sudo make cleanup        # remove TAP devices
-make clean               # remove all build artifacts and downloaded images
-```
+---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│  pudu (host)                                     │
-│  ┌────────────┐  HTTP  ┌───────────────────────┐ │
-│  │  scenario  │───────▶│  pudu-agent (in VM)   │ │
-│  │  runner    │        │  :7777                │ │
-│  └────────────┘        │  /fault/start         │ │
-│       │                │  /fault/stop          │ │
-│  ┌────▼───────┐        │  /metrics             │ │
-│  │  Firecracker        │  /services            │ │
-│  │  microVMs  │        └───────────────────────┘ │
-│  └────────────┘                                  │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────┐      ┌─────────────────────┐
+│  pudu server  (runs as root)     │      │  puduc  (CLI client) │
+│                                  │◀────▶│                      │
+│  /api/v1/fleets        (REST)    │ HTTP │  puduc fleet create  │
+│  /api/v1/scenarios     (REST)    │      │  puduc scenario run  │
+│  /ws?vm=N              (WS SSH)  │      │  puduc terminal N    │
+│  /                     (web UI)  │      └─────────────────────┘
+└──────────────────────────────────┘
+         │
+         │ Firecracker
+         ▼
+┌─────────────────────┐    ┌───────────────────────┐
+│  microVM (tapN)      │    │  pudu-agent  :7777    │
+│  172.16.N.2          │───▶│  /fault/start         │
+│                      │    │  /fault/stop          │
+└─────────────────────┘    │  /metrics             │
+                            └───────────────────────┘
 ```
 
-Each VM gets a TAP interface on `172.16.N.0/30`:
-- Host gateway: `172.16.N.1`
-- VM IP: `172.16.N.2`
+Networking is created on-demand: each VM gets a dedicated `/30` subnet with its TAP device created automatically at launch time.
 
-## Commands
+| VM index | Host gateway | VM IP |
+|---|---|---|
+| 0 | `172.16.0.1` | `172.16.0.2` |
+| 1 | `172.16.1.1` | `172.16.1.2` |
+| N | `172.16.N.1` | `172.16.N.2` |
 
-### `pudu run` — Launch a single VM
+SSH into any VM: `ssh root@172.16.N.2` (password: `root`)
 
-```
-pudu run [flags]
-
-  --kernel          path to vmlinux kernel image (required)
-  --rootfs          path to ext4 rootfs image (required)
-  --firecracker-bin path to firecracker binary
-  --vcpus           number of vCPUs (default: 1)
-  --mem             memory in MiB (default: 512)
-  --tap             TAP device name
-  --mac             VM MAC address
-  --count           number of VMs to launch in parallel
-```
-
-### `pudu serve` — Launch VMs + web terminal
-
-Starts a fleet of VMs and a browser-based SSH terminal on `http://localhost:8888`.
-
-```
-pudu serve --kernel vmlinux.bin --rootfs rootfs.ext4 --count 3 --port 8888
-```
-
-### `pudu scenario run` — Run a training scenario
-
-```
-pudu scenario run [flags] <scenario.yaml>
-
-  --kernel          path to vmlinux kernel image (required)
-  --rootfs          path to ext4 rootfs image (required)
-  --scale           tier scale overrides, e.g. web=2,db=1
-  --dry-run         validate scenario without launching VMs
-```
-
-Example:
-```bash
-sudo pudu scenario run \
-  --kernel vmlinux.bin \
-  --rootfs rootfs.ext4 \
-  scenarios/microservices/db-connection-exhaustion.yaml
-```
+---
 
 ## Scenario YAML format
-
-Scenarios describe the VM topology, faults to inject, signals shown to the trainee, objectives to verify success, hints, and scoring.
 
 ```yaml
 scenario:
@@ -180,18 +170,16 @@ faults:
   - id: disk-fill-app
     type: disk              # cpu | memory | disk | network | process | dns
     target:
-      tier: app             # target a whole tier...
-      # vm: app-0           # ...or a specific VM
-      # select: random      # all | random | primary (default: all)
+      tier: app
     params:
       path: /
-    at: 0s                  # when to inject (from scenario start)
-    duration: 10m           # auto-recover after this long (optional)
+    at: 0s
+    duration: 10m
 
 signals:
   alerts:
     - name: DiskSpaceLow
-      severity: critical    # critical | warning | info
+      severity: critical
       fired_at: 0s
       message: "Disk usage above 95%"
   symptoms:
@@ -201,7 +189,7 @@ objectives:
   - id: disk-recovered
     description: Disk usage below 80% on app-0
     check:
-      type: agent-metric    # http | agent-metric | process-running
+      type: agent-metric
       target:
         vm: app-0
       metric: disk_used_pct
@@ -218,26 +206,28 @@ scoring:
   perfect_window: 5m
 ```
 
-### Fault types and parameters
+### Fault types
 
 | Type | Key params | Effect |
 |---|---|---|
 | `cpu` | `load` (e.g. `80%`) | Saturates CPUs to target percentage |
 | `memory` | `rate` (e.g. `30mb/min`), `ceiling` (e.g. `85%`) | Simulates a memory leak |
 | `disk` | `path` (default `/`) | Fills filesystem by writing a hidden file |
-| `network` | `action` (delay/loss/corrupt), `latency`, `jitter`, `packet_loss` | Uses `tc netem` to inject network impairments |
-| `process` | `service`, `action` (stop/restart/degrade), `restart` (true/false) | Manipulates systemd services |
+| `network` | `action` (delay/loss/corrupt), `latency`, `jitter`, `packet_loss` | Uses `tc netem` |
+| `process` | `service`, `action` (stop/restart/degrade) | Manipulates systemd services |
 | `dns` | `record`, `resolve_to` | Injects a spoofed entry into `/etc/hosts` |
 
 ### Objective check types
 
 | Type | Fields | Passes when |
 |---|---|---|
-| `http` | `path`, `expected_status` | HTTP GET returns expected status code |
+| `http` | `path`, `expected_status` | HTTP GET returns expected status |
 | `agent-metric` | `metric`, `condition` | Metric satisfies condition (e.g. `disk_used_pct < 80`) |
 | `process-running` | `service` | systemd service is active |
 
 Available metrics: `cpu_pct`, `mem_used_pct`, `disk_used_pct`, `disk_free_mb`, `load_avg_1`
+
+---
 
 ## Included scenarios
 
@@ -246,27 +236,33 @@ Available metrics: `cpu_pct`, `mem_used_pct`, `disk_used_pct`, `disk_free_mb`, `
 | `scenarios/monolith/disk-full.yaml` | Easy | Disk fills completely, app returns 500s |
 | `scenarios/microservices/db-connection-exhaustion.yaml` | Medium | Three-stage cascade: DB CPU spike → network latency → API memory leak |
 
+---
+
 ## Makefile targets
 
 ```bash
-make build          # build pudu + pudu-agent
+make deps           # install firecracker + system dependencies
+make build          # build pudu, pudu-agent, puduc
+make build-puduc    # build puduc client only
 make assets         # download kernel + rootfs, install agent into rootfs
-make net-up-multi   # create TAP devices for N VMs (default N=3)
-make net-down-multi # remove TAP devices
-make serve          # launch fleet + web terminal
+make server         # start REST API server on :8888
+make serve          # launch fleet + web terminal (direct, N=3 default)
 make scenario       # run SCENARIO= file (default: monolith/disk-full)
 make clean          # remove binaries, images, logs
+make cleanup        # tear down all TAP devices
 ```
+
+---
 
 ## In-VM agent
 
-`pudu-agent` runs inside each VM on port `7777` and handles fault injection commands from the scenario runner.
+`pudu-agent` runs inside each VM on port `7777`.
 
 ```bash
-# Check agent health
+# Health check
 curl http://172.16.0.2:7777/health
 
-# Get current metrics
+# Current metrics
 curl http://172.16.0.2:7777/metrics
 
 # Inject a fault manually
@@ -278,21 +274,9 @@ curl -X POST http://172.16.0.2:7777/fault/stop \
   -d '{"id":"test"}'
 ```
 
-## Networking
-
-Each VM uses a dedicated `/30` subnet:
-
-| VM index | Host gateway | VM IP |
-|---|---|---|
-| 0 | `172.16.0.1` | `172.16.0.2` |
-| 1 | `172.16.1.1` | `172.16.1.2` |
-| N | `172.16.N.1` | `172.16.N.2` |
-
-SSH into any VM: `ssh root@172.16.N.2` (password: `root`)
-
 ## Cleanup
 
 ```bash
-make cleanup    # tear down TAP networking
+make cleanup    # remove TAP devices
 make clean      # remove all build artifacts and downloaded images
 ```
