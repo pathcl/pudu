@@ -5,10 +5,16 @@ import (
 	"os/exec"
 )
 
-// EnsureTAP idempotently creates tap{id} with host IP 172.16.{id}.1/30,
-// enables IP forwarding, and adds a MASQUERADE rule so the VM can reach
-// the internet. Safe to call concurrently for different IDs.
+// EnsureTAP creates tap{id} with host IP 172.16.{id}.1/30, enables IP
+// forwarding, and adds a MASQUERADE rule so the VM can reach the internet.
+// It always removes any pre-existing device first so stale interfaces left
+// by a crashed Firecracker process do not cause EBUSY failures.
+// Safe to call concurrently for different IDs.
 func EnsureTAP(id int) error {
+	// Unconditionally remove any stale device before (re-)creating it.
+	// RemoveTAP is a no-op when the device does not exist.
+	RemoveTAP(id)
+
 	tap := fmt.Sprintf("tap%d", id)
 	hostIP := fmt.Sprintf("172.16.%d.1/30", id)
 
@@ -55,8 +61,6 @@ func isAlreadyExists(msg string) bool {
 		"already exists",
 		"RTNETLINK answers: File exists",
 		"File exists",
-		"Device or resource busy",
-		"TUNSETIFF",
 	} {
 		if contains(msg, s) {
 			return true
