@@ -92,6 +92,42 @@ else
     echo "  (skipping onfire-agent: $AGENT_BIN not found)"
 fi
 
+# Install onfire CLI helper for use inside the VM (hint requests, status)
+echo "==> Installing onfire CLI helper..."
+cat <<'ONFIRE_SCRIPT' | sudo tee "$MOUNTPOINT/usr/local/bin/onfire" > /dev/null
+#!/bin/sh
+# Derive this VM's ID from the default gateway: 172.16.N.1 → N
+GATEWAY=$(ip route show default | awk '{print $3; exit}')
+VMID=$(echo "$GATEWAY" | cut -d. -f3)
+SERVER="http://${GATEWAY}:8888"
+
+_post() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -sf -X POST "$1"
+    else
+        wget -qO- --post-data='' "$1"
+    fi
+}
+
+case "${1:-}" in
+    hint)
+        result=$(_post "${SERVER}/api/v1/vms/${VMID}/hint") || {
+            echo "error: could not reach onfire server at ${SERVER}" >&2
+            exit 1
+        }
+        hint=$(echo "$result" | grep -o '"hint":"[^"]*"' | cut -d'"' -f4)
+        score=$(echo "$result" | grep -o '"score":[0-9]*' | cut -d: -f2)
+        echo "Hint: ${hint}"
+        echo "Current score: ${score}"
+        ;;
+    *)
+        echo "Usage: onfire hint"
+        ;;
+esac
+ONFIRE_SCRIPT
+sudo chmod +x "$MOUNTPOINT/usr/local/bin/onfire"
+echo "  ✓ onfire helper installed"
+
 # Install stress-ng for realistic CPU fault injection (best-effort)
 echo "==> Installing stress-ng (optional, improves CPU fault accuracy)..."
 sudo chroot "$MOUNTPOINT" apt-get install -y --no-install-recommends stress-ng > /dev/null 2>&1 && \

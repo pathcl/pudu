@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -267,6 +268,63 @@ func (s *Server) deleteScenario(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleVM routes requests under /api/v1/vms/.
+// Currently supports: POST /api/v1/vms/{id}/hint
+func (s *Server) handleVM(w http.ResponseWriter, r *http.Request) {
+	// Expect path: /api/v1/vms/{id}/hint
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/vms/")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 || parts[1] != "hint" || r.Method != http.MethodPost {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	vmID, err := strconv.Atoi(parts[0])
+	if err != nil {
+		http.Error(w, "invalid vm id", http.StatusBadRequest)
+		return
+	}
+
+	// Find the running scenario that owns this VM ID.
+	s.mu.RLock()
+	var entry *ScenarioEntry
+	for _, sc := range s.scenarios {
+		if sc.Status != "running" {
+			continue
+		}
+		for _, vm := range sc.VMs {
+			if vm.ID == vmID {
+				entry = sc
+				break
+			}
+		}
+		if entry != nil {
+			break
+		}
+	}
+	s.mu.RUnlock()
+
+	if entry == nil {
+		http.Error(w, "no running scenario owns this VM", http.StatusNotFound)
+		return
+	}
+	if entry.runner == nil {
+		http.Error(w, "runner not available", http.StatusInternalServerError)
+		return
+	}
+
+	hint := entry.runner.RequestHintText()
+	score := entry.runner.CurrentScore()
+
+	s.mu.Lock()
+	entry.HintsUsed++
+	entry.Score = score
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(hintResponse{Hint: hint, Score: score}) //nolint:errcheck
 }
 
 // parseScaleOverrides parses "web=2,db=1" into map[string]int.
