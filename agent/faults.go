@@ -218,17 +218,31 @@ func runDiskFault(ctx context.Context, params map[string]string) {
 		buf[i] = 0xFF
 	}
 
+	fileGone := func() bool {
+		_, err := os.Stat(fillPath)
+		return os.IsNotExist(err)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
+			// If the trainee deleted the file, close our fd to free the blocks.
+			if fileGone() {
+				return
+			}
 			if _, err := f.Write(buf); err != nil {
-				// Disk full or cancelled — wait for context cancel
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(time.Second):
+				// Disk full — poll until context cancelled or trainee removes the file.
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(500 * time.Millisecond):
+						if fileGone() {
+							return
+						}
+					}
 				}
 			}
 		}
