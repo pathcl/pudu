@@ -71,3 +71,46 @@ func PrepareRootFS(baseRootFS string, id int, sizeMiB int64) (string, error) {
 
 	return vmRootFS, nil
 }
+
+// WriteToRootFS writes content to vmPath inside the ext4 image via debugfs.
+// The parent directory must already exist in the image.
+func WriteToRootFS(rootfs, vmPath, content string) error {
+	// Write content to a host temp file first
+	tmp, err := os.CreateTemp("", "debugfs-content-*")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	tmp.Close()
+
+	dir := vmPath[:lastSlash(vmPath)]
+	name := vmPath[lastSlash(vmPath)+1:]
+
+	script, err := os.CreateTemp("", "debugfs-script-*")
+	if err != nil {
+		return fmt.Errorf("create debugfs script: %w", err)
+	}
+	defer os.Remove(script.Name())
+	fmt.Fprintf(script, "cd %s\nrm %s\nwrite %s %s\n", dir, name, tmp.Name(), name)
+	script.Close()
+
+	cmd := exec.Command("debugfs", "-w", "-f", script.Name(), rootfs)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("debugfs write failed: %v\n%s", err, out)
+	}
+	return nil
+}
+
+// lastSlash returns the index of the last '/' in s, or 0 if none.
+func lastSlash(s string) int {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == '/' {
+			return i
+		}
+	}
+	return 0
+}

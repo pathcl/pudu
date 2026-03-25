@@ -75,34 +75,22 @@ func (r *Runner) Run(ctx context.Context) error {
 		baseCfg.FirecrackerBin = r.opts.FirecrackerBin
 	}
 
-	// Generate per-VM cloud-init ISOs, always fresh so the scenario MOTD
-	// is embedded at boot time (not dependent on provisioning timing).
+	// Generate per-VM cloud-init ISOs (always fresh — no stat skip)
 	if baseCfg.CloudInitISO != "" {
-		// Write MOTD to a temp file so make-cloud-init-iso.sh can embed it.
-		motdContent := r.buildMOTD()
-		motdFile, err := os.CreateTemp("", "pudu-motd-*.txt")
-		if err != nil {
-			return fmt.Errorf("create motd temp file: %w", err)
-		}
-		motdPath := motdFile.Name()
-		defer os.Remove(motdPath)
-		if _, err := motdFile.WriteString(motdContent); err != nil {
-			motdFile.Close()
-			return fmt.Errorf("write motd temp file: %w", err)
-		}
-		motdFile.Close()
-
 		base := baseCfg.CloudInitISO
 		stem := base[:len(base)-4] // strip .iso
 		for i := 0; i < r.Plan.TotalVMs; i++ {
 			dst := fmt.Sprintf("%s-%d.iso", stem, i)
 			hostname := r.Plan.VMs[i].Name
-			cmd := exec.Command("bash", "make-cloud-init-iso.sh", dst, "cloud-init-config.yaml", hostname, motdPath)
+			cmd := exec.Command("bash", "make-cloud-init-iso.sh", dst, "cloud-init-config.yaml", hostname)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				return fmt.Errorf("cloud-init ISO for VM %d: %w\n%s", i, err, out)
 			}
 		}
 	}
+
+	// Build MOTD once; it is injected into each VM's rootfs via debugfs below.
+	motd := r.buildMOTD()
 
 	// Launch all VMs
 	fmt.Fprintf(os.Stderr, "Launching %d VM(s)...\n", r.Plan.TotalVMs)
@@ -136,6 +124,14 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			defer os.Remove(rootFS)
 			cfg.RootFSPath = rootFS
+
+			// Inject MOTD directly into the ext4 image via debugfs so it is
+			// present before sshd accepts the first connection.
+			if motd != "" {
+				if err := vm.WriteToRootFS(rootFS, "/etc/motd", motd); err != nil {
+					fmt.Fprintf(os.Stderr, "  warning: could not write MOTD to %s: %v\n", e.Name, err)
+				}
+			}
 
 			m, err := vm.New(fleetCtx, cfg)
 			if err != nil {

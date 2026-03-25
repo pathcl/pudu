@@ -4,7 +4,6 @@ set -e
 OUTPUT="${1:-cloud-init.iso}"
 CONFIG="${2:-cloud-init-config.yaml}"
 HOSTNAME="${3:-}"
-MOTD_FILE="${4:-}"  # optional: path to a file whose contents become /etc/motd
 
 if [ ! -f "$CONFIG" ]; then
     echo "Error: cloud-init config file not found: $CONFIG" >&2
@@ -40,21 +39,6 @@ if [ -n "$HOSTNAME" ]; then
 else
     # Replace CLOUDHOST with a default if no hostname provided
     sed "s/CLOUDHOST/firecracker-vm/g" "$CONFIG" > "$TMPDIR/nocloud/user-data"
-fi
-
-# If a MOTD file is provided, append extra runcmd steps that write the
-# scenario brief to /etc/motd and install a profile.d hook so it prints
-# on every interactive login.  We use runcmd (not write_files) because
-# the Firecracker CI image may not have the write_files cloud-init module
-# enabled; runcmd is always active.
-if [ -n "$MOTD_FILE" ] && [ -f "$MOTD_FILE" ]; then
-    MOTD_B64=$(base64 -w0 < "$MOTD_FILE")
-    # runcmd is the last top-level key so appending list items extends it.
-    printf "  - echo %s | base64 -d > /etc/motd\n"                               "$MOTD_B64" >> "$TMPDIR/nocloud/user-data"
-    printf "  - chmod 0644 /etc/motd\n"                                                        >> "$TMPDIR/nocloud/user-data"
-    printf "  - echo '#!/bin/sh' > /etc/profile.d/99-scenario.sh\n"                           >> "$TMPDIR/nocloud/user-data"
-    printf "  - echo 'cat /etc/motd 2>/dev/null' >> /etc/profile.d/99-scenario.sh\n"          >> "$TMPDIR/nocloud/user-data"
-    printf "  - chmod 0755 /etc/profile.d/99-scenario.sh\n"                                   >> "$TMPDIR/nocloud/user-data"
 fi
 
 # Create ISO using mkisofs
